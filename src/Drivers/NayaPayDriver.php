@@ -13,9 +13,7 @@ use PakPay\PakPay\Exceptions\SignatureVerificationException;
 use PakPay\PakPay\Exceptions\UnsupportedFlowException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Str;
 
 /**
  * NayaPay (Arc) gateway driver — hosted checkout / redirect (embed) only.
@@ -50,16 +48,7 @@ final class NayaPayDriver extends AbstractGatewayDriver
      */
     public function checkout(PaymentRequest $request): RedirectResponse
     {
-        $fields = $this->checkoutFields($request);
-
-        $token = (string) Str::uuid();
-        Cache::put("pakpay:redirect:{$token}", [
-            'action' => $this->endpoint('checkout'),
-            'fields' => $fields,
-            'gateway' => $this->name(),
-        ], now()->addMinutes(10));
-
-        return new RedirectResponse(route('pakpay.redirect', ['token' => $token]));
+        return $this->hostedRedirect($this->endpoint('checkout'), $this->checkoutFields($request));
     }
 
     /**
@@ -169,24 +158,10 @@ final class NayaPayDriver extends AbstractGatewayDriver
      */
     public function computeSignature(array $fields): string
     {
-        $key = $this->requireConfig('hash_key');
-
-        $signable = [];
-        foreach ($fields as $name => $value) {
-            if ($name === self::SIGNATURE_FIELD) {
-                continue;
-            }
-            $value = (string) $value;
-            if ($value === '') {
-                continue;
-            }
-            $signable[$name] = $value;
-        }
-
-        ksort($signable);
-        $message = implode('&', array_values($signable));
-
-        return strtoupper(hash_hmac('sha256', $message, $key));
+        return $this->hmac(
+            $this->signableString($fields, [self::SIGNATURE_FIELD]),
+            $this->requireConfig('hash_key')
+        );
     }
 
     /**

@@ -13,9 +13,7 @@ use PakPay\PakPay\Exceptions\SignatureVerificationException;
 use DateTimeImmutable;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Str;
 
 /**
  * EasyPaisa (Telenor Microfinance Bank) gateway driver.
@@ -52,16 +50,7 @@ final class EasyPaisaDriver extends AbstractGatewayDriver
      */
     public function checkout(PaymentRequest $request): RedirectResponse
     {
-        $fields = $this->checkoutFields($request);
-
-        $token = (string) Str::uuid();
-        Cache::put("pakpay:redirect:{$token}", [
-            'action' => $this->endpoint('checkout'),
-            'fields' => $fields,
-            'gateway' => $this->name(),
-        ], now()->addMinutes(10));
-
-        return new RedirectResponse(route('pakpay.redirect', ['token' => $token]));
+        return $this->hostedRedirect($this->endpoint('checkout'), $this->checkoutFields($request));
     }
 
     /**
@@ -246,38 +235,9 @@ final class EasyPaisaDriver extends AbstractGatewayDriver
      */
     public function expectedReturnSignature(array $fields): string
     {
-        $key = $this->requireConfig('hash_key');
-
-        $signable = [];
-        foreach ($fields as $name => $value) {
-            $value = (string) $value;
-            if ($value === '') {
-                continue;
-            }
-            $signable[$name] = $value;
-        }
-
-        ksort($signable);
-        $message = implode('&', array_values($signable));
-
-        return strtoupper(hash_hmac('sha256', $message, $key));
-    }
-
-    /**
-     * Decode a JSON gateway response body into an array.
-     *
-     * @return array<string, mixed>
-     *
-     * @throws GatewayException If the body is not valid JSON.
-     */
-    private function decode(string $body): array
-    {
-        $data = json_decode($body, true);
-
-        if (! is_array($data)) {
-            throw GatewayException::fromResponse($this->name(), 'Unexpected non-JSON response from gateway.');
-        }
-
-        return $data;
+        return $this->hmac(
+            $this->signableString($fields, ['signature']),
+            $this->requireConfig('hash_key')
+        );
     }
 }

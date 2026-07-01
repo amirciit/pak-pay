@@ -11,10 +11,10 @@ use PakPay\PakPay\DTOs\RefundResult;
 use PakPay\PakPay\Enums\PaymentState;
 use PakPay\PakPay\Exceptions\GatewayException;
 use PakPay\PakPay\Exceptions\SignatureVerificationException;
+use PakPay\PakPay\Support\AutoSubmitForm;
 use DateTimeImmutable;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 
@@ -62,18 +62,8 @@ final class JazzCashDriver extends AbstractGatewayDriver
      */
     public function checkout(PaymentRequest $request): RedirectResponse
     {
-        $fields = $this->hostedFields($request);
-
-        $token = (string) Str::uuid();
-
-        // Short-lived stash so credentials are not exposed in a redirect URL.
-        Cache::put("pakpay:redirect:{$token}", [
-            'action' => $this->endpoint('checkout'),
-            'fields' => $fields,
-            'gateway' => $this->name(),
-        ], now()->addMinutes(10));
-
-        return new RedirectResponse(route('pakpay.redirect', ['token' => $token]));
+        // Short-lived server-side stash, so credentials never travel in a URL.
+        return $this->hostedRedirect($this->endpoint('checkout'), $this->hostedFields($request));
     }
 
     /**
@@ -86,7 +76,11 @@ final class JazzCashDriver extends AbstractGatewayDriver
      */
     public function checkoutForm(PaymentRequest $request): string
     {
-        return $this->autoSubmitForm($this->endpoint('checkout'), $this->hostedFields($request));
+        return AutoSubmitForm::render(
+            $this->endpoint('checkout'),
+            $this->hostedFields($request),
+            'Continue to JazzCash'
+        );
     }
 
     /**
@@ -309,26 +303,13 @@ final class JazzCashDriver extends AbstractGatewayDriver
     {
         $salt = $this->requireConfig('integrity_salt');
 
-        $signable = [];
-        foreach ($fields as $key => $value) {
-            if ($key === 'pp_SecureHash') {
-                continue;
-            }
-            if (! str_starts_with($key, 'pp_') && ! str_starts_with($key, 'ppmpf_')) {
-                continue;
-            }
-            $value = (string) $value;
-            if ($value === '') {
-                continue;
-            }
-            $signable[$key] = $value;
-        }
+        $values = $this->signableString(
+            $fields,
+            ['pp_SecureHash'],
+            static fn (string $key): bool => str_starts_with($key, 'pp_') || str_starts_with($key, 'ppmpf_'),
+        );
 
-        ksort($signable);
-
-        $message = $salt . '&' . implode('&', array_values($signable));
-
-        return strtoupper(hash_hmac('sha256', $message, $salt));
+        return $this->hmac($salt . '&' . $values, $salt);
     }
 
     /**
@@ -349,47 +330,4 @@ final class JazzCashDriver extends AbstractGatewayDriver
         };
     }
 
-    /**
-     * Decode a JSON gateway response body into an array.
-     *
-     * @return array<string, mixed>
-     *
-     * @throws GatewayException If the body is not valid JSON.
-     */
-    private function decode(string $body): array
-    {
-        $data = json_decode($body, true);
-
-        if (! is_array($data)) {
-            throw GatewayException::fromResponse($this->name(), 'Unexpected non-JSON response from gateway.');
-        }
-
-        return $data;
-    }
-
-    /**
-     * Build a self-submitting HTML form for the hosted-checkout POST.
-     *
-     * @param array<string, string> $fields
-     */
-    private function autoSubmitForm(string $action, array $fields): string
-    {
-        $inputs = '';
-        foreach ($fields as $name => $value) {
-            $inputs .= sprintf(
-                '<input type="hidden" name="%s" value="%s">',
-                htmlspecialchars($name, ENT_QUOTES),
-                htmlspecialchars($value, ENT_QUOTES)
-            );
-        }
-
-        return sprintf(
-            '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Redirecting…</title></head>'
-            . '<body onload="document.forms[0].submit()">'
-            . '<form method="POST" action="%s">%s<noscript><button type="submit">Continue to JazzCash</button></noscript></form>'
-            . '</body></html>',
-            htmlspecialchars($action, ENT_QUOTES),
-            $inputs
-        );
-    }
 }
