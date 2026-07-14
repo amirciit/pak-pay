@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PakPay\PakPay\Http\Controllers;
 
+use PakPay\PakPay\Support\AutoSubmitForm;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Cache;
 
@@ -30,38 +31,15 @@ final class PakPayRedirectController
             return new Response('This payment redirect has expired. Please restart your checkout.', 410);
         }
 
-        return new Response($this->form((string) $stash['action'], $stash['fields']), 200, [
+        $html = AutoSubmitForm::render((string) $stash['action'], $stash['fields']);
+
+        return new Response($html, 200, [
             'Content-Type' => 'text/html; charset=UTF-8',
+            // A signed payment payload must never be cached or archived.
+            'Cache-Control' => 'no-store, no-cache, must-revalidate, private',
+            'Pragma' => 'no-cache',
+            'Referrer-Policy' => 'no-referrer',
+            'X-Frame-Options' => 'DENY',
         ]);
-    }
-
-    /**
-     * Build the self-submitting HTML form.
-     *
-     * @param array<string, string> $fields
-     */
-    private function form(string $action, array $fields): string
-    {
-        $inputs = '';
-        foreach ($fields as $name => $value) {
-            $inputs .= sprintf(
-                '<input type="hidden" name="%s" value="%s">',
-                htmlspecialchars((string) $name, ENT_QUOTES),
-                htmlspecialchars((string) $value, ENT_QUOTES)
-            );
-        }
-
-        return sprintf(
-            '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
-            . '<meta name="viewport" content="width=device-width, initial-scale=1">'
-            . '<title>Redirecting to payment…</title></head>'
-            . '<body onload="document.forms[0].submit()">'
-            . '<form method="POST" action="%s">%s'
-            . '<noscript><p>JavaScript is disabled. Click continue to proceed.</p>'
-            . '<button type="submit">Continue to payment</button></noscript>'
-            . '</form></body></html>',
-            htmlspecialchars($action, ENT_QUOTES),
-            $inputs
-        );
     }
 }
