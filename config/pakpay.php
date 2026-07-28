@@ -47,6 +47,20 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Hosted-redirect Payload Lifetime
+    |--------------------------------------------------------------------------
+    |
+    | How many minutes a signed hosted-checkout payload stays in the cache
+    | before its one-time token expires. Keep it short: it only has to survive
+    | the browser hop between your checkout controller and the render route.
+    | The token is consumed on first use regardless.
+    |
+    */
+
+    'redirect_ttl' => (int) env('PAKPAY_REDIRECT_TTL', 10),
+
+    /*
+    |--------------------------------------------------------------------------
     | Gateways
     |--------------------------------------------------------------------------
     |
