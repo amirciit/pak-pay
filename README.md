@@ -1,11 +1,12 @@
 # PakPay
 
-[![Version](https://img.shields.io/badge/version-1.0.0%20stable-brightgreen)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.1.0%20stable-brightgreen)](CHANGELOG.md)
+[![CI](https://github.com/imabbas8/pak-pay/actions/workflows/tests.yml/badge.svg)](https://github.com/imabbas8/pak-pay/actions/workflows/tests.yml)
 [![Developer](https://img.shields.io/badge/developer-Abbas%20Aslam-blue)](https://github.com/imabbas8)
 [![Company](https://img.shields.io/badge/Debug%20Flow-debugflow.com-0b5fff)](https://debugflow.com)
 [![PHP](https://img.shields.io/badge/PHP-8.0%20--%208.4-777BB4?logo=php&logoColor=white)](#requirements)
 [![Laravel](https://img.shields.io/badge/Laravel-8%20--%2013-FF2D20?logo=laravel&logoColor=white)](#requirements)
-[![Tests](https://img.shields.io/badge/tests-52%20passed-success)](#testing)
+[![Tests](https://img.shields.io/badge/tests-81%20passed-success)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 
 A single, unified Laravel API for accepting payments through Pakistani payment gateways
@@ -165,6 +166,7 @@ Optional production settings:
 
 ```env
 PAKPAY_ROUTE_PREFIX=pakpay              # URL prefix for the hosted-redirect route
+PAKPAY_REDIRECT_TTL=10                  # minutes a stashed hosted-checkout payload stays valid
 JAZZCASH_HOSTED_SEND_PASSWORD=true      # set false to keep pp_Password out of the browser form
 ```
 
@@ -180,6 +182,7 @@ Copy the block you need into your app's `.env`. Only fill in the gateways you us
 | `PAKPAY_MODE` | `sandbox` | Flips **every** gateway between `sandbox` and `production` endpoints. |
 | `PAKPAY_GATEWAY` | `jazzcash` | Default gateway used when you call `PakPay::checkout()` without `gateway()`. |
 | `PAKPAY_ROUTE_PREFIX` | `pakpay` | URL prefix for the hosted-redirect route (`/{prefix}/redirect/{token}`). |
+| `PAKPAY_REDIRECT_TTL` | `10` | Minutes a signed hosted-checkout payload stays in the cache. The token is one-time regardless. |
 | **JazzCash** | | |
 | `JAZZCASH_MERCHANT_ID` | — | Merchant ID (`pp_MerchantID`). |
 | `JAZZCASH_PASSWORD` | — | Merchant password (`pp_Password`). |
@@ -492,7 +495,9 @@ you use them in the listed place. (Detailed tables for each one follow below.)
 | `src/Enums/PaymentState.php` | `PENDING`, `PROCESSING`, `PAID`, `FAILED`, `CANCELLED`, `REFUNDED`, `UNKNOWN` | You **compare** `$result->state === PaymentState::PAID`. |
 | `src/Facades/PakPay.php` | the `PakPay` facade | Entry point: `PakPay::gateway('jazzcash')->...`. |
 | `src/PakPayManager.php` | `gateway($name)` resolver | `PakPay::gateway('easypaisa')` picks the driver. |
-| `config/pakpay.php` | `default`, `mode`, `route.prefix`, `route.middleware`, `gateways.*` | You **set** these via `.env` (see [env settings](#all-environment-settings-at-a-glance)). |
+| `src/Drivers/AbstractGatewayDriver.php` | `config`, `mode` + the shared `endpoint()`, `signableString()`, `hmac()`, `decode()`, `hostedRedirect()` helpers | Only when **writing a driver** — every gateway extends this. |
+| `src/Support/AutoSubmitForm.php` | `render($action, $fields, $label)` | Renders the self-submitting POST form (used by the redirect route and `JazzCashDriver::checkoutForm()`). |
+| `config/pakpay.php` | `default`, `mode`, `route.prefix`, `route.middleware`, `redirect_ttl`, `gateways.*` | You **set** these via `.env` (see [env settings](#all-environment-settings-at-a-glance)). |
 
 ### Config/env variable — which gateway file reads it
 
@@ -647,6 +652,7 @@ for the env names. Read at runtime with `config('pakpay.<key>')`:
 | `pakpay.mode` | `PAKPAY_MODE` | `sandbox` or `production` — flips every gateway's endpoints. |
 | `pakpay.route.prefix` | `PAKPAY_ROUTE_PREFIX` | URL prefix for the hosted-redirect route. |
 | `pakpay.route.middleware` | — | Middleware array for that route (default `['web']`). |
+| `pakpay.redirect_ttl` | `PAKPAY_REDIRECT_TTL` | Minutes a stashed hosted-checkout payload stays valid (default `10`). |
 | `pakpay.gateways.<name>.*` | per-gateway `*` | Credentials + endpoints for each gateway. |
 
 ## Gateway capability matrix
@@ -709,7 +715,7 @@ composer install        # installs dev deps (Pest, Testbench)
 composer test           # or: vendor/bin/pest
 ```
 
-Expected result: **52 passing tests (98 assertions)** — all green. ✅
+Expected result: **81 passing tests (173 assertions)** — all green. ✅
 
 > **Note on the dev toolchain.** The package *runtime* supports PHP `^8.0`, but
 > the *test* dependencies do not all go that low: Pest 3 / Testbench 11 need PHP
@@ -753,6 +759,10 @@ tampered one** (amount changed after signing).
 | PayFast/Raast scaffolds throw `UnsupportedFlowException` | `tests/Feature/ScaffoldDriverTest.php` |
 | Manager/factory resolution | `tests/Feature/ManagerTest.php` |
 | One-time redirect token (no replay) | `tests/Feature/RedirectRouteTest.php` |
+| Redirect payload TTL + no-store headers | `tests/Feature/RedirectTtlTest.php` |
+| Auto-submit form rendering + HTML escaping | `tests/Unit/AutoSubmitFormTest.php` |
+| `PaymentRequest` validation + paisa/decimal conversion | `tests/Unit/PaymentRequestTest.php` |
+| `PaymentState` successful/final/vocabulary | `tests/Unit/PaymentStateTest.php` |
 
 Each flow is tested for **success, failure, tampered signature (must throw),
 unsupported flow (must throw)**, and — for Safepay — **expired token (401 →
@@ -781,12 +791,12 @@ suite re-run against it:
 
 | Laravel | Testbench | PHP | Pest | Result |
 |:-------:|:---------:|:---:|:----:|:------:|
-| 8       | 6.x       | 8.2 | 1.23 | ✅ 52 passed |
-| 9       | 7.x       | 8.2 | 3.x  | ✅ 52 passed |
-| 10      | 8.x       | 8.2 | 3.x  | ✅ 52 passed |
-| 11      | 9.x       | 8.2 | 3.x  | ✅ 52 passed |
-| 12      | 10.x      | 8.3 | 3.x  | ✅ 52 passed |
-| 13 (`v13.15.0`) | 11.x | 8.4 | 3.x¹ | ✅ 52 passed |
+| 8       | 6.x       | 8.2 | 1.23 | ✅ 81 passed |
+| 9       | 7.x       | 8.2 | 3.x  | ✅ 81 passed |
+| 10      | 8.x       | 8.2 | 3.x  | ✅ 81 passed |
+| 11      | 9.x       | 8.2 | 3.x  | ✅ 81 passed |
+| 12      | 10.x      | 8.3 | 3.x  | ✅ 81 passed |
+| 13 (`v13.15.0`) | 11.x | 8.4 | 3.x¹ | ✅ 81 passed |
 
 ¹ **Laravel 13 note.** The package itself runs fine on Laravel 13. The only catch
 is the **test-only** dependency `pestphp/pest-plugin-laravel`, whose latest
@@ -799,7 +809,7 @@ plugin for the Laravel 13 jobs and the full suite passes:
 composer remove --dev pestphp/pest-plugin-laravel --no-update
 composer require "laravel/framework:13.*" "orchestra/testbench:11.*" --dev --no-update
 composer update --prefer-stable --with-all-dependencies
-vendor/bin/pest        # → 52 passed
+vendor/bin/pest        # → 81 passed
 ```
 
 PHP **8.0** and **8.1** aren't installed on the dev machine above, but the
@@ -819,7 +829,7 @@ PHP 8 release:
 Everything else the package relies on — constructor property promotion, named
 arguments, `match`, the nullsafe `?->` operator — is already valid PHP 8.0.
 Verified by linting every `src/` file (`php -l`) and running the full Pest suite
-(**52 passed**).
+(**81 passed**).
 
 ### 6. How the fakes work (writing your own test)
 
@@ -875,6 +885,9 @@ and `config/pakpay.php`. To validate against a live sandbox:
 
 Issues and pull requests are welcome at
 [github.com/imabbas8/pak-pay](https://github.com/imabbas8/pak-pay/issues).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow, and
+[SECURITY.md](SECURITY.md) before reporting anything security-related —
+**never** open a public issue for a vulnerability.
 
 ```bash
 git clone https://github.com/imabbas8/pak-pay.git
@@ -882,6 +895,9 @@ cd pak-pay
 composer install
 composer test
 ```
+
+Every push and pull request runs the suite on **PHP 8.0–8.4 × Laravel 8–13**
+via [GitHub Actions](.github/workflows/tests.yml).
 
 ## License
 
