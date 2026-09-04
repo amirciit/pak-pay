@@ -29,7 +29,7 @@ it('computes the NayaPay signature to a known vector', function (): void {
         'transaction_id' => 'NP-TXN-9',
     ]);
 
-    expect($sig)->toBe('E7C993ADB704C734E7B59267B8D85B9E0066D11826357EC35A83FB5F3B9B23BA');
+    expect($sig)->toBe('565B0195B9EDDB066AA99E675848AEDA2281DBD6390022A2BD7B1348420C9078');
 });
 
 it('verifies a correctly-signed NayaPay return', function (): void {

@@ -152,14 +152,21 @@ final class NayaPayDriver extends AbstractGatewayDriver
     /**
      * Compute the HMAC-SHA256 signature over the sorted non-empty fields.
      *
-     * // VERIFY the exact signing scheme with the NayaPay Arc docs.
+     * The signed message is built from "key=value" pairs (not values alone) so
+     * that field boundaries are unambiguous: values-only concatenation lets
+     * {a:"x", b:"y&z"} and {a:"x&y", b:"z"} hash identically. Both signing
+     * (outbound checkout) and verifying (inbound callback) go through this
+     * method, so the two stay symmetric.
+     *
+     * // VERIFY the exact signing scheme with the NayaPay Arc docs and align
+     * this construction with what NayaPay expects and sends.
      *
      * @param array<string, mixed> $fields
      */
     public function computeSignature(array $fields): string
     {
         return $this->hmac(
-            $this->signableString($fields, [self::SIGNATURE_FIELD]),
+            $this->signablePairs($fields, [self::SIGNATURE_FIELD]),
             $this->requireConfig('hash_key')
         );
     }
@@ -169,13 +176,7 @@ final class NayaPayDriver extends AbstractGatewayDriver
      */
     private function mapState(string $value): string
     {
-        return match (strtolower($value)) {
-            'paid', 'completed', 'success', 'successful' => PaymentState::PAID,
-            'pending', 'in_progress', 'initiated' => PaymentState::PENDING,
-            'failed', 'declined' => PaymentState::FAILED,
-            'cancelled', 'canceled' => PaymentState::CANCELLED,
-            'refunded' => PaymentState::REFUNDED,
-            default => PaymentState::UNKNOWN,
-        };
+        // NayaPay uses the common vocabulary verbatim.
+        return $this->mapCommonState($value);
     }
 }

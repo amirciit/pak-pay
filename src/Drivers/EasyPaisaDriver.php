@@ -107,7 +107,7 @@ final class EasyPaisaDriver extends AbstractGatewayDriver
             'Credentials' => base64_encode($this->requireConfig('account_num') . ':' . $this->requireConfig('hash_key')),
         ])->acceptJson()->asJson()->post($this->endpoint('mobile_account'), array_filter($payload, static fn ($v) => $v !== null));
 
-        $data = $this->decode($response->body());
+        $data = $this->decodeResponse($response);
 
         $code = (string) ($data['responseCode'] ?? '');
         $success = $code === self::SUCCESS_CODE;
@@ -185,7 +185,7 @@ final class EasyPaisaDriver extends AbstractGatewayDriver
             'Credentials' => base64_encode($this->requireConfig('account_num') . ':' . $this->requireConfig('hash_key')),
         ])->acceptJson()->asJson()->post($this->endpoint('status'), $payload);
 
-        $data = $this->decode($response->body());
+        $data = $this->decodeResponse($response);
         $code = (string) ($data['responseCode'] ?? '');
 
         return new PaymentStatus(
@@ -229,14 +229,21 @@ final class EasyPaisaDriver extends AbstractGatewayDriver
     /**
      * Compute the expected HMAC-SHA256 signature for a return payload.
      *
-     * // VERIFY: replace with EasyPaisa's documented return-signature scheme.
+     * The signed message is built from "key=value" pairs rather than values
+     * alone, so field boundaries are unambiguous: values-only concatenation
+     * lets {a:"x", b:"y&z"} and {a:"x&y", b:"z"} hash identically, which an
+     * attacker can use to shift a value across fields without changing the
+     * signature.
+     *
+     * // VERIFY: replace with EasyPaisa's documented return-signature scheme and
+     * align this construction with what your account's callback actually sends.
      *
      * @param array<string, mixed> $fields The response fields, excluding `signature`.
      */
     public function expectedReturnSignature(array $fields): string
     {
         return $this->hmac(
-            $this->signableString($fields, ['signature']),
+            $this->signablePairs($fields, ['signature']),
             $this->requireConfig('hash_key')
         );
     }

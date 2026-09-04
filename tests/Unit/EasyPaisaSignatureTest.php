@@ -32,7 +32,7 @@ it('computes the EasyPaisa merchantHashedReq (AES-128-ECB) to a known vector', f
 });
 
 it('computes the EasyPaisa return signature to a known vector', function (): void {
-    $expected = 'B9AF92B0ADB695863D69077C7B1A82D139769D218E9B6EA725C9E67AFD321AB4';
+    $expected = 'EAD81F51063EB899964FD3211CAA0FFE3BBC0AA2AF6F6D2379A12CF5BBE707F3';
 
     $sig = easypaisaDriver()->expectedReturnSignature([
         'amount' => '150.00',
