@@ -40,4 +40,24 @@ final class PaymentResult
     {
         return $this->success && PaymentState::isSuccessful($this->state);
     }
+
+    /**
+     * The result as a plain array — what you persist against the order or write
+     * to your payment log after verifying a callback.
+     *
+     * @return array<string, mixed>
+     */
+    public function toArray(): array
+    {
+        return [
+            'success' => $this->success,
+            'state' => $this->state,
+            'transaction_id' => $this->transactionId,
+            'order_id' => $this->orderId,
+            'amount' => $this->amount,
+            'gateway_code' => $this->gatewayCode,
+            'message' => $this->message,
+            'raw' => $this->raw,
+        ];
+    }
 }

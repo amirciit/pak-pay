@@ -27,6 +27,21 @@ final class Customer
     }
 
     /**
+     * The customer as a plain array, using the same keys {@see fromArray()} reads.
+     *
+     * @return array<string, string|null>
+     */
+    public function toArray(): array
+    {
+        return [
+            'name' => $this->name,
+            'email' => $this->email,
+            'mobile' => $this->mobile,
+            'cnic_last6' => $this->cnicLast6,
+        ];
+    }
+
+    /**
      * Build a Customer from an associative array.
      *
      * @param array<string, mixed> $data

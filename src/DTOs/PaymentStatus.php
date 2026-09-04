@@ -36,4 +36,29 @@ final class PaymentStatus
     {
         return PaymentState::isSuccessful($this->state);
     }
+
+    /**
+     * Whether the transaction has reached a state that will not change again.
+     */
+    public function isFinal(): bool
+    {
+        return PaymentState::isFinal($this->state);
+    }
+
+    /**
+     * The status as a plain array (for logging or reconciliation records).
+     *
+     * @return array<string, mixed>
+     */
+    public function toArray(): array
+    {
+        return [
+            'state' => $this->state,
+            'transaction_id' => $this->transactionId,
+            'amount' => $this->amount,
+            'gateway_code' => $this->gatewayCode,
+            'message' => $this->message,
+            'raw' => $this->raw,
+        ];
+    }
 }

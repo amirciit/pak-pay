@@ -39,6 +39,36 @@ final class PaymentRequest
         if (trim($orderId) === '') {
             throw new InvalidArgumentException('PaymentRequest orderId must not be empty.');
         }
+
+        // Surrounding whitespace in an order id is invisible in a dashboard but
+        // very visible in a signature, so normalise it before it is signed.
+        $this->orderId = trim($orderId);
+
+        $this->currency = strtoupper(trim($currency));
+
+        if (preg_match('/^[A-Z]{3}$/', $this->currency) !== 1) {
+            throw new InvalidArgumentException(
+                "PaymentRequest currency must be a 3-letter ISO 4217 code, got [{$currency}]."
+            );
+        }
+    }
+
+    /**
+     * The request as a plain array (for logging or persisting alongside an order).
+     *
+     * @return array<string, mixed>
+     */
+    public function toArray(): array
+    {
+        return [
+            'amount' => $this->amount,
+            'order_id' => $this->orderId,
+            'currency' => $this->currency,
+            'description' => $this->description,
+            'customer' => $this->customer?->toArray(),
+            'return_url' => $this->returnUrl,
+            'meta' => $this->meta,
+        ];
     }
 
     /**

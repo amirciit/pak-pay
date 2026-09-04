@@ -28,4 +28,22 @@ final class RefundResult
         public array $raw = [],
     ) {
     }
+
+    /**
+     * The refund as a plain array (for logging or persisting against the order).
+     *
+     * @return array<string, mixed>
+     */
+    public function toArray(): array
+    {
+        return [
+            'success' => $this->success,
+            'transaction_id' => $this->transactionId,
+            'refund_id' => $this->refundId,
+            'amount' => $this->amount,
+            'gateway_code' => $this->gatewayCode,
+            'message' => $this->message,
+            'raw' => $this->raw,
+        ];
+    }
 }
