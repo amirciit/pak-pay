@@ -83,11 +83,16 @@ return [
             'language' => env('JAZZCASH_LANGUAGE', 'EN'),
 
             // SECURITY: when true, pp_Password is included in the *hosted* form,
-            // which exposes it in the browser page source. JazzCash historically
-            // requires it there; set this false if your Hosted Checkout does not,
-            // so the merchant password is never sent to the client. The direct
-            // wallet charge() always sends it server-to-server (safe).
-            'hosted_send_password' => env('JAZZCASH_HOSTED_SEND_PASSWORD', true),
+            // which exposes the merchant password in the browser page source.
+            // Defaults to FALSE so the secret is never sent to the client. Only
+            // set this true if your JazzCash Hosted Checkout integration truly
+            // requires pp_Password in the form. The direct wallet charge()
+            // always sends it server-to-server (safe) regardless of this flag.
+            'hosted_send_password' => env('JAZZCASH_HOSTED_SEND_PASSWORD', false),
+
+            // How long the customer has to complete a transaction
+            // (pp_TxnExpiryDateTime). // VERIFY the window JazzCash allows.
+            'txn_expiry_minutes' => (int) env('JAZZCASH_TXN_EXPIRY_MINUTES', 60),
 
             'endpoints' => [
                 // VERIFY against official JazzCash docs (Sandbox / Live portals).
@@ -136,6 +141,11 @@ return [
             'secret_key' => env('SAFEPAY_SECRET_KEY'),
             // Webhook signing secret from the Safepay dashboard.
             'webhook_secret' => env('SAFEPAY_WEBHOOK_SECRET'),
+
+            // How long (seconds) a delivered webhook signature is remembered so
+            // a re-delivery is rejected as a replay. Lower it if you depend on
+            // Safepay retrying a webhook your app failed to process.
+            'webhook_dedup_ttl' => (int) env('SAFEPAY_WEBHOOK_DEDUP_TTL', 86400),
             'return_url' => env('SAFEPAY_RETURN_URL'),
             'cancel_url' => env('SAFEPAY_CANCEL_URL'),
             'currency' => env('SAFEPAY_CURRENCY', 'PKR'),
