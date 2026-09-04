@@ -23,6 +23,22 @@ it('formats paisa as a major-unit decimal string', function (int $paisa, string 
     [100000000, '1000000.00'],
 ]);
 
+it('normalises the currency to an upper-case ISO code', function (string $given, string $expected): void {
+    expect((new PaymentRequest(amount: 100, orderId: 'ORDER-1', currency: $given))->currency)->toBe($expected);
+})->with([
+    ['PKR', 'PKR'],
+    ['pkr', 'PKR'],
+    [' usd ', 'USD'],
+]);
+
+it('rejects a currency that is not a 3-letter code', function (string $currency): void {
+    new PaymentRequest(amount: 100, orderId: 'ORDER-1', currency: $currency);
+})->with(['', 'PK', 'RUPEE', 'PK1'])->throws(InvalidArgumentException::class);
+
+it('trims the order id so it cannot differ invisibly from what was signed', function (): void {
+    expect((new PaymentRequest(amount: 100, orderId: '  ORDER-1 '))->orderId)->toBe('ORDER-1');
+});
+
 it('builds from an array, including the nested customer', function (): void {
     $request = PaymentRequest::fromArray([
         'amount' => 15000,
