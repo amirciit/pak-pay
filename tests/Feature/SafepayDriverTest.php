@@ -101,6 +101,41 @@ it('rejects a webhook with no signature', function (): void {
     PakPay::gateway('safepay')->verifyCallback($request);
 })->throws(SignatureVerificationException::class);
 
+it('rejects a replayed webhook (duplicate signature) even without a timestamp', function (): void {
+    $driver = PakPay::gateway('safepay');
+    $body = '{"type":"payment:created","data":{"state":"TRACKER_COMPLETED","tracker":"track_dedupe","order_id":"ORDER-9","amount":15000}}';
+    $sig = $driver->computeWebhookSignature($body);
+
+    $makeRequest = fn (): Request => Request::create('/webhook', 'POST', [], [], [], [
+        'HTTP_X_SFPY_SIGNATURE' => $sig,
+        'CONTENT_TYPE' => 'application/json',
+    ], $body);
+
+    // First delivery is accepted (no timestamp header present).
+    $result = $driver->verifyCallback($makeRequest());
+    expect($result->isPaid())->toBeTrue();
+
+    // Re-delivering the identical, validly-signed webhook is rejected as a replay.
+    $driver->verifyCallback($makeRequest());
+})->throws(SignatureVerificationException::class);
+
+it('still accepts a different webhook after one has been recorded', function (): void {
+    $driver = PakPay::gateway('safepay');
+
+    $deliver = function (string $body) use ($driver) {
+        return $driver->verifyCallback(Request::create('/webhook', 'POST', [], [], [], [
+            'HTTP_X_SFPY_SIGNATURE' => $driver->computeWebhookSignature($body),
+            'CONTENT_TYPE' => 'application/json',
+        ], $body));
+    };
+
+    $first = $deliver('{"data":{"state":"TRACKER_COMPLETED","tracker":"t1","order_id":"ORDER-1"}}');
+    $second = $deliver('{"data":{"state":"TRACKER_COMPLETED","tracker":"t2","order_id":"ORDER-2"}}');
+
+    expect($first->orderId)->toBe('ORDER-1')
+        ->and($second->orderId)->toBe('ORDER-2');
+});
+
 it('rejects a replayed webhook (stale timestamp)', function (): void {
     $driver = PakPay::gateway('safepay');
     $body = '{"data":{"state":"TRACKER_COMPLETED"}}';
@@ -138,4 +173,18 @@ it('refunds an order', function (): void {
     expect($refund->success)->toBeTrue()
         ->and($refund->refundId)->toBe('rf_1')
         ->and($refund->amount)->toBe(5000);
+});
+
+it('does not report a rejected refund as successful', function (): void {
+    Http::fake([
+        '*client/passport*' => Http::response(['data' => ['token' => 'TKN1']], 200),
+        // Accepted by the API (200) but rejected in the payload.
+        '*order/v1/refund*' => Http::response(['data' => ['state' => 'REJECTED', 'message' => 'Not refundable']], 200),
+    ]);
+
+    $refund = PakPay::gateway('safepay')->refund('track_1', 5000);
+
+    expect($refund->success)->toBeFalse()
+        ->and($refund->gatewayCode)->toBe('REJECTED')
+        ->and($refund->message)->toBe('Not refundable');
 });

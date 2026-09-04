@@ -42,8 +42,11 @@ final class SafepayDriver extends AbstractGatewayDriver
     /** Optional webhook timestamp header used for replay protection. // VERIFY. */
     private const TIMESTAMP_HEADER = 'X-SFPY-Timestamp';
 
-    /** Max age (seconds) of a webhook before it is treated as a replay. */
+    /** Max age (seconds) of a webhook before it is stale (when a timestamp is sent). */
     private const REPLAY_WINDOW = 300;
+
+    /** How long (seconds) each seen signature is remembered, to reject duplicates. */
+    private const DEDUP_TTL = 86400;
 
     /**
      * {@inheritDoc}
@@ -123,7 +126,7 @@ final class SafepayDriver extends AbstractGatewayDriver
             throw SignatureVerificationException::mismatch($this->name());
         }
 
-        $this->assertNotReplayed($request);
+        $this->assertNotReplayed($request, $provided);
 
         /** @var array<string, mixed> $payload */
         $payload = json_decode($raw, true) ?: [];
@@ -166,12 +169,18 @@ final class SafepayDriver extends AbstractGatewayDriver
 
         $data = (array) $response->json();
 
+        // A 2xx means Safepay accepted the refund request; if the body also
+        // carries a state, honour it — an accepted-but-rejected refund is not
+        // a success, and reporting it as one would strand the customer.
+        $stateValue = (string) (Arr::get($data, 'data.state') ?? Arr::get($data, 'data.status') ?? '');
+        $state = $stateValue === '' ? null : $this->mapState($stateValue);
+
         return new RefundResult(
-            success: true,
+            success: $state === null || $state !== PaymentState::FAILED && $state !== PaymentState::CANCELLED,
             transactionId: $txnId,
             refundId: Arr::get($data, 'data.refund_id') !== null ? (string) Arr::get($data, 'data.refund_id') : null,
             amount: $amount,
-            gatewayCode: (string) ($response->status()),
+            gatewayCode: $stateValue !== '' ? $stateValue : (string) $response->status(),
             message: Arr::get($data, 'data.message') !== null ? (string) Arr::get($data, 'data.message') : null,
             raw: $data,
         );
@@ -300,23 +309,58 @@ final class SafepayDriver extends AbstractGatewayDriver
     }
 
     /**
-     * Reject webhooks older than the replay window (when a timestamp is sent).
+     * Reject replayed webhooks.
+     *
+     * Two independent defences, neither of which depends on the timestamp
+     * header being covered by the signature:
+     *
+     *  1. **Single-use signature.** A valid HMAC is unique per event body, so
+     *     each one is recorded and any duplicate delivery is rejected. This
+     *     blocks a captured-and-resent webhook even when NO timestamp header is
+     *     present (that case previously skipped replay protection entirely) and
+     *     even when the timestamp is rewritten, since it is not signed.
+     *  2. **Freshness window.** When a timestamp IS provided, anything older
+     *     than the replay window is rejected before the signature is recorded.
+     *
+     * Note the trade-off of (1): a genuine gateway *retry* of a delivery your
+     * app failed to process is also a duplicate, and will be rejected while the
+     * signature is remembered. Handle the webhook idempotently and reconcile
+     * against the gateway with status() rather than relying on retries; lower
+     * `safepay.webhook_dedup_ttl` if you need the retry window back sooner.
      *
      * @throws SignatureVerificationException
      */
-    private function assertNotReplayed(Request $request): void
+    private function assertNotReplayed(Request $request, string $signature): void
     {
         $ts = $request->header(self::TIMESTAMP_HEADER);
 
-        if ($ts === null || $ts === '') {
-            return; // No timestamp provided; signature alone must be relied upon.
+        if ($ts !== null && $ts !== '') {
+            $age = abs(time() - (int) $ts);
+
+            if ($age > self::REPLAY_WINDOW) {
+                throw SignatureVerificationException::replayDetected($this->name());
+            }
         }
 
-        $age = abs(time() - (int) $ts);
+        // Cache::add is an atomic check-and-set: it returns false when the key
+        // already exists, i.e. this exact signature has been delivered before.
+        // Atomicity matters — two concurrent deliveries of the same webhook
+        // must not both pass a read-then-write check.
+        $key = 'pakpay:safepay:webhook:' . hash('sha256', $signature);
 
-        if ($age > self::REPLAY_WINDOW) {
+        if (! Cache::add($key, true, now()->addSeconds($this->dedupTtl()))) {
             throw SignatureVerificationException::replayDetected($this->name());
         }
+    }
+
+    /**
+     * How long (in seconds) a delivered webhook signature is remembered.
+     */
+    private function dedupTtl(): int
+    {
+        $ttl = (int) ($this->config['webhook_dedup_ttl'] ?? self::DEDUP_TTL);
+
+        return $ttl > 0 ? $ttl : self::DEDUP_TTL;
     }
 
     /**
@@ -346,13 +390,14 @@ final class SafepayDriver extends AbstractGatewayDriver
      */
     private function mapState(string $value): string
     {
-        return match (strtolower($value)) {
-            'tracker_completed', 'paid', 'completed', 'success', 'succeeded' => PaymentState::PAID,
-            'tracker_pending', 'pending', 'created', 'requires_action' => PaymentState::PENDING,
-            'tracker_rejected', 'failed', 'declined', 'error' => PaymentState::FAILED,
-            'tracker_cancelled', 'cancelled', 'canceled' => PaymentState::CANCELLED,
-            'refunded' => PaymentState::REFUNDED,
-            default => PaymentState::UNKNOWN,
-        };
+        // Safepay prefixes its tracker events ("TRACKER_COMPLETED"); strip that
+        // and the rest is the vocabulary every driver shares.
+        $value = strtolower(trim($value));
+
+        if (str_starts_with($value, 'tracker_')) {
+            $value = substr($value, strlen('tracker_'));
+        }
+
+        return $this->mapCommonState($value);
     }
 }
