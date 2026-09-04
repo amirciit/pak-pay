@@ -42,6 +42,9 @@ final class JazzCashDriver extends AbstractGatewayDriver
     /** Success response code returned by JazzCash. */
     private const SUCCESS_CODE = '000';
 
+    /** Default lifetime (minutes) of a transaction, via pp_TxnExpiryDateTime. */
+    private const DEFAULT_TXN_EXPIRY_MINUTES = 60;
+
     /**
      * {@inheritDoc}
      */
@@ -93,8 +96,9 @@ final class JazzCashDriver extends AbstractGatewayDriver
     {
         $fields = $this->baseFields($request, txnType: 'MPAY');
 
-        // Optionally keep the merchant password out of the browser-rendered form.
-        if (! ($this->config['hosted_send_password'] ?? true)) {
+        // Secure by default: the merchant password stays out of the browser-
+        // rendered form unless the integration explicitly opts back in.
+        if (! ($this->config['hosted_send_password'] ?? false)) {
             unset($fields['pp_Password']);
         }
 
@@ -130,7 +134,7 @@ final class JazzCashDriver extends AbstractGatewayDriver
             ->acceptJson()
             ->post($this->endpoint('wallet'), $fields);
 
-        $data = $this->decode($response->body());
+        $data = $this->decodeResponse($response);
 
         $code = (string) ($data['pp_ResponseCode'] ?? '');
         $success = $code === self::SUCCESS_CODE;
@@ -208,7 +212,7 @@ final class JazzCashDriver extends AbstractGatewayDriver
         $fields['pp_SecureHash'] = $this->secureHash($fields);
 
         $response = Http::asJson()->acceptJson()->post($this->endpoint('refund'), $fields);
-        $data = $this->decode($response->body());
+        $data = $this->decodeResponse($response);
 
         $code = (string) ($data['pp_ResponseCode'] ?? '');
         $success = $code === self::SUCCESS_CODE;
@@ -239,7 +243,7 @@ final class JazzCashDriver extends AbstractGatewayDriver
         $fields['pp_SecureHash'] = $this->secureHash($fields);
 
         $response = Http::asJson()->acceptJson()->post($this->endpoint('status'), $fields);
-        $data = $this->decode($response->body());
+        $data = $this->decodeResponse($response);
 
         $code = (string) ($data['pp_ResponseCode'] ?? '');
 
@@ -262,8 +266,9 @@ final class JazzCashDriver extends AbstractGatewayDriver
     private function baseFields(PaymentRequest $request, string $txnType): array
     {
         $now = new DateTimeImmutable();
-        // Expiry one hour out. // VERIFY allowed window with JazzCash docs.
-        $expiry = $now->modify('+1 hour');
+        // How long the customer has to complete the payment.
+        // VERIFY the allowed window with the JazzCash docs before widening it.
+        $expiry = $now->modify('+' . $this->txnExpiryMinutes() . ' minutes');
 
         return array_filter([
             'pp_Version' => self::VERSION,
@@ -313,6 +318,16 @@ final class JazzCashDriver extends AbstractGatewayDriver
     }
 
     /**
+     * How long (in minutes) a hosted/wallet transaction stays payable.
+     */
+    private function txnExpiryMinutes(): int
+    {
+        $minutes = (int) ($this->config['txn_expiry_minutes'] ?? self::DEFAULT_TXN_EXPIRY_MINUTES);
+
+        return $minutes > 0 ? $minutes : self::DEFAULT_TXN_EXPIRY_MINUTES;
+    }
+
+    /**
      * Map a JazzCash response/status code to a normalised PaymentState.
      */
     private function mapState(string $code, string $status): string
@@ -321,13 +336,15 @@ final class JazzCashDriver extends AbstractGatewayDriver
             return PaymentState::PAID;
         }
 
-        return match (strtolower($status)) {
-            'pending', 'in progress' => PaymentState::PENDING,
-            'completed', 'paid', 'success' => PaymentState::PAID,
-            'failed', 'declined' => PaymentState::FAILED,
-            'cancelled' => PaymentState::CANCELLED,
-            default => $code === '' ? PaymentState::UNKNOWN : PaymentState::FAILED,
-        };
+        $state = $this->mapCommonState($status);
+
+        // A response code we could not map is a failure, not an unknown: the
+        // gateway answered, and it did not answer "000".
+        if ($state === PaymentState::UNKNOWN && $code !== '') {
+            return PaymentState::FAILED;
+        }
+
+        return $state;
     }
 
 }

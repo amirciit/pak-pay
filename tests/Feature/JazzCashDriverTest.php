@@ -50,13 +50,40 @@ it('omits the merchant password from the hosted form when disabled', function ()
         ->and($stash['fields'])->toHaveKey('pp_SecureHash');
 });
 
-it('includes the merchant password in the hosted form by default', function (): void {
+it('omits the merchant password from the hosted form by default', function (): void {
+    // Secure default: pp_Password is NOT rendered into the browser form unless
+    // hosted_send_password is explicitly enabled.
+    $response = PakPay::gateway('jazzcash')->checkout(jazzcashRequest());
+
+    $token = basename(parse_url($response->getTargetUrl(), PHP_URL_PATH));
+    $stash = Cache::get("pakpay:redirect:{$token}");
+
+    expect($stash['fields'])->not->toHaveKey('pp_Password');
+});
+
+it('includes the merchant password in the hosted form when explicitly enabled', function (): void {
+    config()->set('pakpay.gateways.jazzcash.hosted_send_password', true);
+
     $response = PakPay::gateway('jazzcash')->checkout(jazzcashRequest());
 
     $token = basename(parse_url($response->getTargetUrl(), PHP_URL_PATH));
     $stash = Cache::get("pakpay:redirect:{$token}");
 
     expect($stash['fields'])->toHaveKey('pp_Password');
+});
+
+it('honours a configured transaction expiry window', function (): void {
+    config()->set('pakpay.gateways.jazzcash.txn_expiry_minutes', 15);
+
+    $response = PakPay::gateway('jazzcash')->checkout(jazzcashRequest());
+
+    $token = basename(parse_url($response->getTargetUrl(), PHP_URL_PATH));
+    $fields = Cache::get("pakpay:redirect:{$token}")['fields'];
+
+    $start = DateTimeImmutable::createFromFormat('YmdHis', $fields['pp_TxnDateTime']);
+    $expiry = DateTimeImmutable::createFromFormat('YmdHis', $fields['pp_TxnExpiryDateTime']);
+
+    expect(intdiv($expiry->getTimestamp() - $start->getTimestamp(), 60))->toBe(15);
 });
 
 it('charges a wallet successfully', function (): void {
