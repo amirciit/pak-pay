@@ -9,8 +9,10 @@ use PakPay\PakPay\DTOs\PaymentRequest;
 use PakPay\PakPay\DTOs\PaymentResult;
 use PakPay\PakPay\DTOs\PaymentStatus;
 use PakPay\PakPay\DTOs\RefundResult;
+use PakPay\PakPay\Enums\PaymentState;
 use PakPay\PakPay\Exceptions\GatewayException;
 use PakPay\PakPay\Exceptions\UnsupportedFlowException;
+use Illuminate\Http\Client\Response as HttpResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -179,14 +181,53 @@ abstract class AbstractGatewayDriver implements GatewayDriver
     }
 
     /**
-     * Build the canonical string a gateway signature is computed over: every
-     * non-empty field value, ordered by field name and joined with "&".
+     * Build the canonical string from the field VALUES alone, ordered by field
+     * name and joined with "&".
+     *
+     * Only use this where the gateway documents that exact construction (as
+     * JazzCash does). Prefer {@see signablePairs()} otherwise: values-only
+     * concatenation cannot tell field boundaries apart, so
+     * `{a: "x", b: "y&z"}` and `{a: "x&y", b: "z"}` hash identically.
      *
      * @param array<string, mixed>        $fields
      * @param list<string>                $exclude   Field names to drop (e.g. the signature itself).
      * @param callable(string): bool|null $keyFilter Optional predicate a field name must satisfy.
      */
     protected function signableString(array $fields, array $exclude = [], ?callable $keyFilter = null): string
+    {
+        return implode('&', array_values($this->canonicalFields($fields, $exclude, $keyFilter)));
+    }
+
+    /**
+     * Build the canonical string from "key=value" pairs, ordered by field name
+     * and joined with "&" — the unambiguous construction, because the field
+     * name is part of the signed message.
+     *
+     * @param array<string, mixed>        $fields
+     * @param list<string>                $exclude   Field names to drop (e.g. the signature itself).
+     * @param callable(string): bool|null $keyFilter Optional predicate a field name must satisfy.
+     */
+    protected function signablePairs(array $fields, array $exclude = [], ?callable $keyFilter = null): string
+    {
+        $pairs = [];
+
+        foreach ($this->canonicalFields($fields, $exclude, $keyFilter) as $name => $value) {
+            $pairs[] = $name . '=' . $value;
+        }
+
+        return implode('&', $pairs);
+    }
+
+    /**
+     * Normalise a payload into the fields that take part in a signature:
+     * scalar, non-empty, not excluded, sorted by name.
+     *
+     * @param array<string, mixed>        $fields
+     * @param list<string>                $exclude
+     * @param callable(string): bool|null $keyFilter
+     * @return array<string, string>
+     */
+    private function canonicalFields(array $fields, array $exclude = [], ?callable $keyFilter = null): array
     {
         $signable = [];
 
@@ -216,7 +257,27 @@ abstract class AbstractGatewayDriver implements GatewayDriver
 
         ksort($signable);
 
-        return implode('&', array_values($signable));
+        return $signable;
+    }
+
+    /**
+     * Map the status vocabulary the gateways share onto a PaymentState.
+     *
+     * Every gateway spells its states differently but most of the words repeat,
+     * so the shared mapping lives here and a driver only handles what is truly
+     * its own (a response code, or a "TRACKER_" style prefix).
+     */
+    protected function mapCommonState(string $value): string
+    {
+        return match (str_replace([' ', '-'], '_', strtolower(trim($value)))) {
+            'paid', 'completed', 'complete', 'success', 'successful', 'succeeded' => PaymentState::PAID,
+            'pending', 'in_progress', 'inprogress', 'initiated', 'created', 'requires_action' => PaymentState::PENDING,
+            'processing' => PaymentState::PROCESSING,
+            'failed', 'failure', 'declined', 'rejected', 'error' => PaymentState::FAILED,
+            'cancelled', 'canceled', 'voided' => PaymentState::CANCELLED,
+            'refunded', 'reversed' => PaymentState::REFUNDED,
+            default => PaymentState::UNKNOWN,
+        };
     }
 
     /**
@@ -235,15 +296,33 @@ abstract class AbstractGatewayDriver implements GatewayDriver
      *
      * @throws GatewayException If the body is not valid JSON.
      */
-    protected function decode(string $body): array
+    protected function decode(string $body, ?int $status = null): array
     {
         /** @var mixed $data */
         $data = json_decode($body, true);
 
         if (! is_array($data)) {
-            throw GatewayException::fromResponse($this->name(), 'Unexpected non-JSON response from gateway.');
+            // A gateway that returns HTML here is almost always an error page or
+            // a maintenance window; carrying the status makes that debuggable.
+            throw GatewayException::fromResponse(
+                $this->name(),
+                'Unexpected non-JSON response from gateway.',
+                $status !== null ? (string) $status : null
+            );
         }
 
         return $data;
+    }
+
+    /**
+     * Decode a gateway HTTP response, reporting its status code on failure.
+     *
+     * @return array<string, mixed>
+     *
+     * @throws GatewayException If the body is not valid JSON.
+     */
+    protected function decodeResponse(HttpResponse $response): array
+    {
+        return $this->decode($response->body(), $response->status());
     }
 }
