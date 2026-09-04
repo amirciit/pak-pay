@@ -1,12 +1,12 @@
 # PakPay
 
-[![Version](https://img.shields.io/badge/version-1.1.0%20stable-brightgreen)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.0.0%20stable-brightgreen)](CHANGELOG.md)
 [![CI](https://github.com/imabbas8/pak-pay/actions/workflows/tests.yml/badge.svg)](https://github.com/imabbas8/pak-pay/actions/workflows/tests.yml)
 [![Developer](https://img.shields.io/badge/developer-Abbas%20Aslam-blue)](https://github.com/imabbas8)
 [![Company](https://img.shields.io/badge/Debug%20Flow-debugflow.com-0b5fff)](https://debugflow.com)
 [![PHP](https://img.shields.io/badge/PHP-8.0%20--%208.4-777BB4?logo=php&logoColor=white)](#requirements)
 [![Laravel](https://img.shields.io/badge/Laravel-8%20--%2013-FF2D20?logo=laravel&logoColor=white)](#requirements)
-[![Tests](https://img.shields.io/badge/tests-81%20passed-success)](#testing)
+[![Tests](https://img.shields.io/badge/tests-121%20passed-success)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 
 A single, unified Laravel API for accepting payments through Pakistani payment gateways
@@ -167,7 +167,9 @@ Optional production settings:
 ```env
 PAKPAY_ROUTE_PREFIX=pakpay              # URL prefix for the hosted-redirect route
 PAKPAY_REDIRECT_TTL=10                  # minutes a stashed hosted-checkout payload stays valid
-JAZZCASH_HOSTED_SEND_PASSWORD=true      # set false to keep pp_Password out of the browser form
+JAZZCASH_HOSTED_SEND_PASSWORD=false     # keep pp_Password out of the browser form (default)
+JAZZCASH_TXN_EXPIRY_MINUTES=60          # how long the customer has to pay
+SAFEPAY_WEBHOOK_DEDUP_TTL=86400         # seconds a webhook signature is remembered (replay defence)
 ```
 
 The redirect route's middleware is configurable via `config('pakpay.route.middleware')`
@@ -190,7 +192,8 @@ Copy the block you need into your app's `.env`. Only fill in the gateways you us
 | `JAZZCASH_RETURN_URL` | — | Where JazzCash posts the signed result. |
 | `JAZZCASH_CURRENCY` | `PKR` | Transaction currency. |
 | `JAZZCASH_LANGUAGE` | `EN` | Hosted form language. |
-| `JAZZCASH_HOSTED_SEND_PASSWORD` | `true` | Set `false` to keep `pp_Password` out of the browser form. |
+| `JAZZCASH_HOSTED_SEND_PASSWORD` | `false` | Secure default: `pp_Password` is **not** rendered into the browser form. Set `true` only if your Hosted Checkout requires it. |
+| `JAZZCASH_TXN_EXPIRY_MINUTES` | `60` | How long the customer has to complete the payment (`pp_TxnExpiryDateTime`). |
 | **EasyPaisa** | | |
 | `EASYPAISA_STORE_ID` | — | Store ID from your onboarding pack. |
 | `EASYPAISA_HASH_KEY` | — | 16-byte AES key used for `merchantHashedReq`. |
@@ -200,6 +203,7 @@ Copy the block you need into your app's `.env`. Only fill in the gateways you us
 | `SAFEPAY_CLIENT_KEY` | — | Public key (safe for the browser / Smart Button). |
 | `SAFEPAY_SECRET_KEY` | — | Secret API key (server-side only). |
 | `SAFEPAY_WEBHOOK_SECRET` | — | Webhook signing secret. |
+| `SAFEPAY_WEBHOOK_DEDUP_TTL` | `86400` | Seconds a delivered webhook signature is remembered, so a re-delivery is rejected as a replay. |
 | `SAFEPAY_RETURN_URL` | — | Success return URL. |
 | `SAFEPAY_CANCEL_URL` | — | Cancel return URL. |
 | `SAFEPAY_CURRENCY` | `PKR` | Transaction currency. |
@@ -675,8 +679,51 @@ gateway-tokenized flows are supported.
   with the Integrity Salt; EasyPaisa: AES-128-ECB `merchantHashedReq`).
 - Incoming callbacks are verified with `hash_equals` (constant-time) before any
   field is trusted; failure throws `SignatureVerificationException`.
-- Hosted-redirect payloads are stashed behind a one-time token (10-min TTL) and
-  consumed once, so a redirect URL cannot be replayed.
+- Hosted-redirect payloads are stashed behind a one-time token (TTL from
+  `PAKPAY_REDIRECT_TTL`, default 10 min) and consumed once, so a redirect URL
+  cannot be replayed. The rendered form is served `no-store`, `no-referrer` and
+  `X-Frame-Options: DENY`.
+- Callback signatures over form fields are computed over **`key=value` pairs**
+  (EasyPaisa, NayaPay), not values alone, so field boundaries are unambiguous:
+  values-only concatenation lets `{a:"x", b:"y&z"}` and `{a:"x&y", b:"z"}` hash
+  identically.
+- Safepay webhooks are replay-protected two ways: each valid signature is
+  **single-use** (recorded with an atomic `Cache::add` and rejected on
+  re-delivery, even when no timestamp header is sent), and a timestamp, when the
+  gateway sends one, must fall inside a 5-minute freshness window.
+- For JazzCash hosted checkout the merchant password (`pp_Password`) is **not**
+  rendered into the browser form by default. Only set
+  `JAZZCASH_HOSTED_SEND_PASSWORD=true` if your integration genuinely requires it.
+
+> ⚠️ **A valid signature proves the payload is authentic — not that the right
+> amount was paid for the right order.** After `verifyCallback()` returns, you
+> **must** reconcile against the order you stored before fulfilling:
+>
+> ```php
+> $result = PakPay::gateway('jazzcash')->verifyCallback($request); // signature verified
+>
+> $order = Order::where('id', $result->orderId)->firstOrFail();
+>
+> // Reject a mismatched amount/currency/order, and only ever fulfil once.
+> abort_if(! $result->success, 422, 'Payment not successful');
+> abort_if($result->amount !== $order->amount_in_paisa, 422, 'Amount mismatch');
+>
+> if ($order->isUnpaid()) {
+>     $order->markPaid($result->transactionId); // idempotent
+> }
+> ```
+>
+> Skipping this lets an attacker with a signed low-value callback (or a replayed
+> one) mark a higher-value order as paid. The library verifies the signature; the
+> amount/order/idempotency check is the integrator's responsibility.
+
+> **Idempotent reconciliation.** Gateways re-deliver callbacks, and Safepay's
+> single-use signature check means a retry of a delivery your app failed to
+> process is rejected as a replay. So do not depend on retries: make the handler
+> idempotent (`if ($order->isUnpaid())`), and reconcile anything you may have
+> missed with `PakPay::gateway(...)->status($txnId)` on a schedule rather than
+> waiting for the gateway to try again. Lower `SAFEPAY_WEBHOOK_DEDUP_TTL` if you
+> want the retry window back sooner.
 
 ## Troubleshooting (common errors)
 
@@ -715,7 +762,7 @@ composer install        # installs dev deps (Pest, Testbench)
 composer test           # or: vendor/bin/pest
 ```
 
-Expected result: **81 passing tests (173 assertions)** — all green. ✅
+Expected result: **121 passing tests (232 assertions)** — all green. ✅
 
 > **Note on the dev toolchain.** The package *runtime* supports PHP `^8.0`, but
 > the *test* dependencies do not all go that low: Pest 3 / Testbench 11 need PHP
@@ -760,6 +807,9 @@ tampered one** (amount changed after signing).
 | Manager/factory resolution | `tests/Feature/ManagerTest.php` |
 | One-time redirect token (no replay) | `tests/Feature/RedirectRouteTest.php` |
 | Redirect payload TTL + no-store headers | `tests/Feature/RedirectTtlTest.php` |
+| Shared gateway→`PaymentState` mapping, non-JSON responses | `tests/Feature/StateMappingTest.php` |
+| Registering your own gateway with `extend()` | `tests/Feature/CustomDriverTest.php` |
+| DTO `toArray()` round-trips | `tests/Unit/DtoSerialisationTest.php` |
 | Auto-submit form rendering + HTML escaping | `tests/Unit/AutoSubmitFormTest.php` |
 | `PaymentRequest` validation + paisa/decimal conversion | `tests/Unit/PaymentRequestTest.php` |
 | `PaymentState` successful/final/vocabulary | `tests/Unit/PaymentStateTest.php` |
@@ -791,12 +841,12 @@ suite re-run against it:
 
 | Laravel | Testbench | PHP | Pest | Result |
 |:-------:|:---------:|:---:|:----:|:------:|
-| 8       | 6.x       | 8.2 | 1.23 | ✅ 81 passed |
-| 9       | 7.x       | 8.2 | 3.x  | ✅ 81 passed |
-| 10      | 8.x       | 8.2 | 3.x  | ✅ 81 passed |
-| 11      | 9.x       | 8.2 | 3.x  | ✅ 81 passed |
-| 12      | 10.x      | 8.3 | 3.x  | ✅ 81 passed |
-| 13 (`v13.15.0`) | 11.x | 8.4 | 3.x¹ | ✅ 81 passed |
+| 8       | 6.x       | 8.2 | 1.23 | ✅ 121 passed |
+| 9       | 7.x       | 8.2 | 3.x  | ✅ 121 passed |
+| 10      | 8.x       | 8.2 | 3.x  | ✅ 121 passed |
+| 11      | 9.x       | 8.2 | 3.x  | ✅ 121 passed |
+| 12      | 10.x      | 8.3 | 3.x  | ✅ 121 passed |
+| 13 (`v13.15.0`) | 11.x | 8.4 | 3.x¹ | ✅ 121 passed |
 
 ¹ **Laravel 13 note.** The package itself runs fine on Laravel 13. The only catch
 is the **test-only** dependency `pestphp/pest-plugin-laravel`, whose latest
@@ -809,7 +859,7 @@ plugin for the Laravel 13 jobs and the full suite passes:
 composer remove --dev pestphp/pest-plugin-laravel --no-update
 composer require "laravel/framework:13.*" "orchestra/testbench:11.*" --dev --no-update
 composer update --prefer-stable --with-all-dependencies
-vendor/bin/pest        # → 81 passed
+vendor/bin/pest        # → 121 passed
 ```
 
 PHP **8.0** and **8.1** aren't installed on the dev machine above, but the
@@ -829,7 +879,7 @@ PHP 8 release:
 Everything else the package relies on — constructor property promotion, named
 arguments, `match`, the nullsafe `?->` operator — is already valid PHP 8.0.
 Verified by linting every `src/` file (`php -l`) and running the full Pest suite
-(**81 passed**).
+(**121 passed**).
 
 ### 6. How the fakes work (writing your own test)
 

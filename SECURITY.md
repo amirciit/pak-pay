@@ -7,8 +7,9 @@ priority over everything else in the backlog.
 
 | Version | Supported |
 |---------|-----------|
-| 1.1.x   | ✅ |
-| 1.0.x   | ✅ (security fixes only) |
+| 2.0.x   | ✅ |
+| 1.1.x   | ✅ (security fixes only) |
+| 1.0.x   | ❌ |
 | < 1.0   | ❌ |
 
 ## Reporting a vulnerability
@@ -30,8 +31,16 @@ prefer to stay anonymous.
 
 - **Every** callback, return and webhook signature is verified with
   `hash_equals()` (constant time) before any field of the payload is trusted.
-- Safepay webhooks are additionally rejected outside a 5-minute timestamp
-  window (replay protection).
+- Safepay webhook signatures are **single-use**: each one is recorded with an
+  atomic `Cache::add` and a duplicate delivery is rejected, so a captured
+  webhook cannot be replayed even when the gateway sends no timestamp header.
+  When a timestamp is present, anything outside a 5-minute window is rejected
+  as well.
+- Signatures over form fields (EasyPaisa, NayaPay) are computed over
+  `key=value` pairs, so a value cannot be shifted across a field boundary
+  without changing the signature.
+- The JazzCash merchant password is not rendered into the hosted form unless
+  the integration explicitly opts in.
 - A gateway that cannot support a flow throws `UnsupportedFlowException`
   instead of returning a fabricated success.
 - Hosted-checkout payloads are stashed server-side behind a **one-time**,
@@ -46,8 +55,12 @@ prefer to stay anonymous.
 - Serving your return/callback routes over **HTTPS only**.
 - Treating a `PaymentResult` as authoritative **only** after `verifyCallback()`
   has returned it — never trust a browser redirect's query string.
-- Making your order fulfilment idempotent: gateways retry callbacks, and a
-  retried callback is a valid signed payload, not an attack.
+- **Reconciling before you fulfil.** A valid signature proves the payload is
+  authentic — not that the right amount was paid for the right order. Check
+  `$result->amount` and `$result->orderId` against the order you stored.
+- Making your order fulfilment idempotent, and reconciling with `status()`
+  rather than relying on gateway retries: a Safepay re-delivery is rejected as
+  a replay while its signature is remembered.
 - Setting `JAZZCASH_HOSTED_SEND_PASSWORD=false` if your JazzCash Hosted
   Checkout does not require `pp_Password` in the browser form.
 
